@@ -1,0 +1,169 @@
+# Namespace для MySQL
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mysql
+
+---
+# Secret с данными для подключения к MySQL
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-secret
+  namespace: mysql
+type: Opaque
+data:
+  # root password: rootpassword (base64 encoded)
+  MYSQL_ROOT_PASSWORD: cm9vdHBhc3N3b3Jk
+  # user: todouser (base64 encoded)
+  MYSQL_USER: dG9kb3VzZXI=
+  # password: todopassword (base64 encoded)
+  MYSQL_PASSWORD: dG9kb3Bhc3N3b3Jk
+
+---
+# ConfigMap для init.sql
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-init-config
+  namespace: mysql
+data:
+  init.sql: |
+    CREATE DATABASE IF NOT EXISTS tododb;
+    USE tododb;
+
+    -- Создание таблиц для Django приложения
+    CREATE TABLE IF NOT EXISTS auth_user (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        password VARCHAR(128) NOT NULL,
+        last_login DATETIME(6),
+        is_superuser TINYINT(1) NOT NULL,
+        username VARCHAR(150) NOT NULL UNIQUE,
+        first_name VARCHAR(150) NOT NULL,
+        last_name VARCHAR(150) NOT NULL,
+        email VARCHAR(254) NOT NULL,
+        is_staff TINYINT(1) NOT NULL,
+        is_active TINYINT(1) NOT NULL,
+        date_joined DATETIME(6) NOT NULL
+    );
+
+    -- Предоставление прав пользователю
+    GRANT ALL PRIVILEGES ON tododb.* TO 'todouser'@'%';
+    FLUSH PRIVILEGES;
+
+---
+# Headless Service для StatefulSet
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-headless
+  namespace: mysql
+  labels:
+    app: mysql
+spec:
+  clusterIP: None
+  selector:
+    app: mysql
+  ports:
+    - port: 3306
+      name: mysql
+
+---
+# StatefulSet для MySQL
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: mysql
+spec:
+  serviceName: mysql-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_ROOT_PASSWORD
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_USER
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_PASSWORD
+            - name: MYSQL_DATABASE
+              value: tododb
+          ports:
+            - containerPort: 3306
+              name: mysql
+          # Liveness Probe - проверяет, жив ли контейнер
+          livenessProbe:
+            exec:
+              command:
+                - mysqladmin
+                - ping
+                - -h
+                - localhost
+                - -u
+                - root
+                - -p$(MYSQL_ROOT_PASSWORD)
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Readiness Probe - проверяет, готов ли контейнер принимать трафик
+          readinessProbe:
+            exec:
+              command:
+                - mysql
+                - -h
+                - localhost
+                - -u
+                - root
+                - -p$(MYSQL_ROOT_PASSWORD)
+                - -e
+                - "SELECT 1"
+            initialDelaySeconds: 5
+            periodSeconds: 2
+            timeoutSeconds: 1
+          # Resource requests и limits
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+          # Монтирование init.sql
+          volumeMounts:
+            - name: mysql-persistent-storage
+              mountPath: /var/lib/mysql
+            - name: mysql-init-volume
+              mountPath: /docker-entrypoint-initdb.d
+      volumes:
+        - name: mysql-init-volume
+          configMap:
+            name: mysql-init-config
+  # Volume Claim Templates для persistent storage
+  volumeClaimTemplates:
+    - metadata:
+        name: mysql-persistent-storage
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
